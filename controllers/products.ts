@@ -1,52 +1,63 @@
+import { Client } from '../deps.ts'
 import { Product } from '../types.ts';
-import { v4 } from '../deps.ts';
+import { dbCreds } from '../config.ts';
 
-let products: Array<Product> = [
-    {
-        id: '1',
-        name: 'Product One',
-        description: "This is product one",
-        price: 29.99
-    },
-    {
-        id: '2',
-        name: 'Product Two',
-        description: "This is product two",
-        price: 39.99
-    },
-    {
-        id: '3',
-        name: 'Product Three',
-        description: "This is product three",
-        price: 59.99
-    }
-]
+// Init client
+const client = new Client(dbCreds);
 
 // @desc    Get all products
 // @route   GET /api/v1/products
-const getProducts = ({response}: {response: any}) => {
-    response.body = {
-        success: true,
-        data: products,
+const getProducts = async ({response}: {response: any}) => {
+    try {
+        await client.connect()
+        const result = await client.queryObject("SELECT * FROM products")
+        console.log('result: ', result)
+        response.status = 200;
+        response.body = {
+            success: true,
+            data: result.rows,
+        }
+    } catch(err) {
+        response.status = 500;
+        response.body = {
+            success: false,
+            msg: "Mysterious DB error: " + err.toString()
+        }
+    } finally {
+        client.end()
     }
 }
 
 // @desc    Get a single product
 // @route   GET /api/v1/products/:id
-const getProduct = ({response, params}: {params: {id: string}, response: any}) => {
-    const product: Product | undefined = products.find(p => p.id === params.id);
-    if(product) {
-        response.status = 200
-        response.body = {
-            success: true,
-            data: product
+const getProduct = async ({response, params}: {params: {id: string}, response: any}) => {
+
+    try{
+        await client.connect();
+        const result = await client.queryObject("SELECT * FROM products WHERE id = $1", params.id)
+        if (result.rows.length === 0) {
+            response.status = 404;
+            response.body = {
+                success: false,
+                msg: `No product with the id of ${params.id}`
+            }
+            return 
+        } else {
+            response.status = 200;
+            response.body = {
+                success: true,
+                data: result.rows
+            }
         }
-    } else { 
-        response.status = 404;
+
+    } catch(err) {
+        response.code = 500
         response.body = {
             success: false,
-            msg: 'No product with that ID found.'
+            msg: "Uh Oh. Error time: " + err.toString()
         }
+    } finally {
+        client.end()
     }
 }
 
@@ -61,51 +72,110 @@ const addProduct = async ({request, response}: {request: any, response: any}) =>
         response.status = 400
         response.body = {
             success: false,
-            msg: "No data provided'"
+            msg: "No data provided"
         }
     } else {
-        product.id = v4.generate();
-        products.push(product);
-        response.status = 201;
-        response.body = {
-            success: true,
-            data: product,
+        try {
+            await client.connect();
+
+            const result = await client.queryObject("INSERT INTO products(name, description, price) VALUES($1,$2,$3)", product.name, product.description, product.price)
+            response.status = 201;
+            response.body = {
+                success: true,
+                data: product,
+            }
+        } catch (err) {
+            response.status = 500
+            response.body = {
+                success: false,
+                msg: "Database error: " + err.toString()
+            }
+        } finally {
+            await client.end()
         }
+
     }
 }
 
 // @desc    Update a single product
 // @route   PUT /api/v1/products/:id
 const updateProduct = async ({params, request, response}: {params: {id: string}, request: any, response: any}) => {
+    const productId = params.id;
+    //TODO: this isn't easy to understand. I should make this logic more explicit
+    await getProduct({params: {id: productId}, response})
 
-    const product: Product | undefined = products.find(p => p.id === params.id);
-
-    if(product) {
-        const body = await request.body();
-        const updatedProduct: Partial<Product> = await body.value;
-        products = products.map(p => p.id === params.id ? {...p, ...updatedProduct} : p)
-
-        response.status = 200
-        response.body = {
-            success: true,
-            data: products.find(p => p.id === params.id),
-        }
-    } else { 
+    if(response.status === 404) {
         response.status = 404;
         response.body = {
             success: false,
-            msg: 'No product with that ID found.'
+            //borrowing this from the returned 'getProduct' call
+            msg: response.body.msg
+        }
+    } else {
+        const body = await request.body()
+        const product = {...response.body.data[0] , ...await body.value};
+
+        if(!request.hasBody) {
+            response.status = 400
+            response.body = {
+                success: false,
+                msg: "No data provided"
+            }
+        } else {
+            try {
+                await client.connect();
+    
+                const result = await client.queryObject("UPDATE products SET name=$1, description=$2, price=$3 WHERE id=$4", product.name, product.description, product.price, params.id);
+
+                response.status = 200;
+                response.body = {
+                    success: true,
+                    data: product,
+                }
+            } catch (err) {
+                response.status = 500
+                response.body = {
+                    success: false,
+                    msg: "Database error: " + err.toString()
+                }
+            } finally {
+                await client.end()
+            }
+
         }
     }
 }
 
 // @desc    Delete a single product
 // @route   DELETE /api/v1/products/:id
-const deleteProduct = ({params, response}: {params: {id: string}, response: any}) => {
-    products = products.filter(p => p.id !== params.id);
-    response.body = {
-        success: true,
-        msg: `Product with ID '${params.id}' deleted.`
+const deleteProduct = async ({params, response}: {params: {id: string}, response: any}) => {
+    await getProduct({params: {id: params.id}, response});
+
+    if(response.status === 404) {
+        response.status = 404
+        response.body = {
+            success: false,
+            msg: response.body.msg
+        }
+    }
+    try {
+        await client.connect()
+        const result = await client.queryObject("DELETE FROM products WHERE id=$1", params.id)
+
+        response.status = 200;
+        response.body = {
+            success: true,
+            msg: `Product with id ${params.id} has been deleted`
+        }
+
+    } catch (err) {
+        response.code = 500;
+        response.body = {
+            success: false,
+            msg: 'Error trying to delete: ' + err.toString()
+        }
+    } finally {
+        client.end()
     }
 }
 
